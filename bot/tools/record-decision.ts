@@ -1,128 +1,66 @@
-import type { JsonValue } from "@grok/agent-sdk";
 import { defineTool } from "@grok/agent-sdk/tools";
 import * as z from "zod/v4";
-import { analysisKey, decisionKey, type StoredAnalysis } from "../lib/bids.js";
-
-const decisionSchema = z.enum(["accept", "reject"]);
-
-type StoredDecision = {
-  analysisRef: string;
-  decision: "accept" | "reject";
-  recommendedBidderCode: string;
-  recommendedBidderName: string;
-  recordedAt: string;
-};
+import { buildComparison, loadData } from "../lib/analysis.js";
+import { BcError, type BcDecision, postDecision, requireConfig } from "../lib/bc.js";
 
 export default defineTool({
   description:
-    "Record the user's accept or reject of the recommended bid. Call this only after the user clearly accepts or rejects the latest compare-bids recommendation. Pass that analysisRef. The same decision has no extra effect. A later different decision does not replace the first one.",
+    "Write the user's accept or reject of the recommended bid to the bid analysis record in Business Central. Call this only after the user clearly accepts or rejects the latest compare-bids recommendation. Pass the same bidAnalysisNo and analysisRef. The same decision again has no extra effect. A different later decision is refused, and the first one stands.",
   execution: "server",
   effect: "idempotent",
   inputSchema: z.object({
+    bidAnalysisNo: z.string().trim().min(1).max(20),
     analysisRef: z.string().trim().min(8).max(64),
-    decision: decisionSchema,
+    decision: z.enum(["accept", "reject"]),
   }),
-  async execute({ analysisRef, decision }, ctx) {
-    const analysis = await ctx.host.kv.get(analysisKey(ctx.session.id, analysisRef));
-    const stored = readAnalysis(analysis);
-    if (stored === undefined || stored.analysisRef !== analysisRef) {
-      return {
-        ok: false as const,
-        error: "No comparison is stored for this session. Compare the bids before recording a decision.",
-      };
-    }
+  async execute({ bidAnalysisNo, analysisRef, decision }, ctx) {
+    const isEval = ctx.session.purpose === "eval";
+    const wanted: BcDecision = decision === "accept" ? "Accepted" : "Rejected";
+    try {
+      const data = await loadData(bidAnalysisNo, isEval);
+      const comparison = buildComparison(data);
+      if (!comparison.ok) {
+        return comparison;
+      }
+      if (comparison.analysisRef !== analysisRef) {
+        return {
+          ok: false as const,
+          error: "The scores in Business Central changed since the recommendation. Compare the bids again.",
+        };
+      }
 
-    const key = decisionKey(ctx.session.id, analysisRef);
-    const existing = readDecision(await ctx.host.kv.get(key));
-    if (existing !== undefined) {
+      const recommended = comparison.recommended;
+      if (comparison.existingDecision !== null) {
+        return {
+          ok: true as const,
+          bidAnalysisNo: comparison.bidAnalysisNo,
+          recommendedBidderCode: recommended.bidderCode,
+          recommendedBidderName: recommended.bidderName,
+          storedDecision: comparison.existingDecision,
+          alreadyRecorded: true,
+          conflict: comparison.existingDecision !== wanted,
+          writtenToBusinessCentral: false,
+        };
+      }
+
+      if (!isEval) {
+        await postDecision(requireConfig(), data.analysis.id, recommended.bidderCode, wanted);
+      }
       return {
         ok: true as const,
-        analysisRef,
-        decision,
-        recommendedBidderCode: stored.recommendedBidderCode,
-        recommendedBidderName: stored.recommendedBidderName,
-        alreadyRecorded: true,
-        conflict: existing.decision !== decision,
-        storedDecision: existing.decision,
+        bidAnalysisNo: comparison.bidAnalysisNo,
+        recommendedBidderCode: recommended.bidderCode,
+        recommendedBidderName: recommended.bidderName,
+        storedDecision: wanted,
+        alreadyRecorded: false,
+        conflict: false,
+        writtenToBusinessCentral: !isEval,
       };
+    } catch (error) {
+      if (error instanceof BcError) {
+        return { ok: false as const, error: error.message };
+      }
+      throw error;
     }
-
-    const record: StoredDecision = {
-      analysisRef,
-      decision,
-      recommendedBidderCode: stored.recommendedBidderCode,
-      recommendedBidderName: stored.recommendedBidderName,
-      recordedAt: ctx.now().toISOString(),
-    };
-    await ctx.host.kv.put(key, record);
-
-    return {
-      ok: true as const,
-      analysisRef,
-      decision,
-      recommendedBidderCode: stored.recommendedBidderCode,
-      recommendedBidderName: stored.recommendedBidderName,
-      alreadyRecorded: false,
-      conflict: false,
-      storedDecision: decision,
-    };
   },
 });
-
-function readAnalysis(value: JsonValue | undefined): StoredAnalysis | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const reasonCode = value.reasonCode;
-  if (
-    typeof value.analysisRef !== "string" ||
-    typeof value.recommendedBidderCode !== "string" ||
-    typeof value.recommendedBidderName !== "string" ||
-    typeof value.totalWeightedScore !== "number" ||
-    typeof value.bidAmount !== "number" ||
-    typeof value.currencyCode !== "string" ||
-    typeof value.reason !== "string" ||
-    (reasonCode !== "only-bid" &&
-      reasonCode !== "highest-score" &&
-      reasonCode !== "lowest-amount" &&
-      reasonCode !== "bidder-code")
-  ) {
-    return undefined;
-  }
-  return {
-    analysisRef: value.analysisRef,
-    recommendedBidderCode: value.recommendedBidderCode,
-    recommendedBidderName: value.recommendedBidderName,
-    totalWeightedScore: value.totalWeightedScore,
-    bidAmount: value.bidAmount,
-    currencyCode: value.currencyCode,
-    reasonCode,
-    reason: value.reason,
-  };
-}
-
-function readDecision(value: JsonValue | undefined): StoredDecision | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  if (
-    typeof value.analysisRef !== "string" ||
-    (value.decision !== "accept" && value.decision !== "reject") ||
-    typeof value.recommendedBidderCode !== "string" ||
-    typeof value.recommendedBidderName !== "string" ||
-    typeof value.recordedAt !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    analysisRef: value.analysisRef,
-    decision: value.decision,
-    recommendedBidderCode: value.recommendedBidderCode,
-    recommendedBidderName: value.recommendedBidderName,
-    recordedAt: value.recordedAt,
-  };
-}
-
-function isRecord(value: JsonValue | undefined): value is Record<string, JsonValue> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

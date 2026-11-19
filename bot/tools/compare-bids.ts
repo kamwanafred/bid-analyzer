@@ -1,27 +1,25 @@
 import { defineTool } from "@grok/agent-sdk/tools";
 import * as z from "zod/v4";
-import { analysisKey, bidSchema, compareBids, storedAnalysis } from "../lib/bids.js";
+import { buildComparison, loadData } from "../lib/analysis.js";
+import { BcError } from "../lib/bc.js";
 
 export default defineTool({
   description:
-    "Rank every evaluated bid in one call and store that recommendation. Call this after evaluators have scored the bids. Pass the full set together. Recommend only the bidder this tool returns.",
+    "Load every bidder's consolidated scores for one bid analysis from Business Central and rank them together. Call this once the evaluators have scored and the committee has consolidated. Pass the bid analysis number. Recommend only the bidder this tool returns. It changes nothing.",
   execution: "server",
-  effect: "idempotent",
+  effect: "read",
   inputSchema: z.object({
-    bids: z.array(bidSchema).min(1).max(50),
+    bidAnalysisNo: z.string().trim().min(1).max(20),
   }),
-  async execute({ bids }, ctx) {
-    const result = compareBids(bids);
-    if (!result.ok) {
-      return result;
+  async execute({ bidAnalysisNo }, ctx) {
+    try {
+      const data = await loadData(bidAnalysisNo, ctx.session.purpose === "eval");
+      return buildComparison(data);
+    } catch (error) {
+      if (error instanceof BcError) {
+        return { ok: false as const, error: error.message };
+      }
+      throw error;
     }
-
-    const key = analysisKey(ctx.session.id, result.analysisRef);
-    const existing = await ctx.host.kv.get(key);
-    if (existing === undefined) {
-      await ctx.host.kv.put(key, storedAnalysis(result));
-    }
-
-    return result;
   },
 });

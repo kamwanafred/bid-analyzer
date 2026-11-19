@@ -56,25 +56,6 @@ export type BidError = {
 
 export type CompareResult = CompareOk | BidError;
 
-export type StoredAnalysis = {
-  analysisRef: string;
-  recommendedBidderCode: string;
-  recommendedBidderName: string;
-  totalWeightedScore: number;
-  bidAmount: number;
-  currencyCode: string;
-  reasonCode: CompareOk["recommended"]["reasonCode"];
-  reason: string;
-};
-
-export function analysisKey(sessionId: string, analysisRef: string): string {
-  return `analysis:${sessionId}:${analysisRef}`;
-}
-
-export function decisionKey(sessionId: string, analysisRef: string): string {
-  return `decision:${sessionId}:${analysisRef}`;
-}
-
 export function compareBids(bids: BidInput[]): CompareResult {
   const normalized = bids.map(normalizeBid);
   const duplicate = findDuplicate(normalized);
@@ -131,19 +112,6 @@ export function compareBids(bids: BidInput[]): CompareResult {
       reason: recommendation.reason,
     },
     ranked,
-  };
-}
-
-export function storedAnalysis(result: CompareOk): StoredAnalysis {
-  return {
-    analysisRef: result.analysisRef,
-    recommendedBidderCode: result.recommended.bidderCode,
-    recommendedBidderName: result.recommended.bidderName,
-    totalWeightedScore: result.recommended.totalWeightedScore,
-    bidAmount: result.recommended.bidAmount,
-    currencyCode: result.recommended.currencyCode,
-    reasonCode: result.recommended.reasonCode,
-    reason: result.recommended.reason,
   };
 }
 
