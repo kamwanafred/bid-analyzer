@@ -13,9 +13,10 @@
  *        -> { value: [{ bidAnalysisNo, bidderCode, bidderName, bidAmount, currencyCode,
  *                       technicalScore, commercialScore, qualityScore, totalWeightedScore,
  *                       evaluatorsCount, evaluatorsSubmitted, rank, recommended }] }
- *   POST bidAnalyses({id})/Microsoft.NAV.recordDecision
- *        body { bidderCode, decision: "Accepted" | "Rejected" }
- *        Must be idempotent for the same decision and refuse a different one.
+ *   PATCH bidAnalyses({id})   (header If-Match: *)
+ *        body { analyzerBidderCode, analyzerDecision: "Accepted" | "Rejected" }
+ *        The same values again change nothing. A different decision is refused.
+ *        Published by the Pharo extension: pages 50819 and 50827, codeunit 50813.
  *
  * Secrets, read at call time: BC_TENANT_ID, BC_CLIENT_ID, BC_CLIENT_SECRET,
  * BC_COMPANY_ID. Optional: BC_ENVIRONMENT (default "production").
@@ -134,7 +135,13 @@ export async function postDecision(
   if (!GUID.test(analysisId)) {
     throw new BcError("Business Central returned an unexpected bid analysis id.");
   }
-  await request(config, "POST", `bidAnalyses(${analysisId})/Microsoft.NAV.recordDecision`, { bidderCode, decision });
+  await request(
+    config,
+    "PATCH",
+    `bidAnalyses(${analysisId})`,
+    { analyzerBidderCode: bidderCode, analyzerDecision: decision },
+    { "if-match": "*" },
+  );
 }
 
 async function getAll<T>(config: BcConfig, path: string, schema: z.ZodType<T>): Promise<T[]> {
@@ -190,7 +197,13 @@ async function accessToken(config: BcConfig): Promise<string> {
   return cachedToken.value;
 }
 
-async function request(config: BcConfig, method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+async function request(
+  config: BcConfig,
+  method: "GET" | "PATCH",
+  path: string,
+  body?: unknown,
+  extraHeaders: Record<string, string> = {},
+): Promise<unknown> {
   const base = `${API_BASE}/v2.0/${config.tenantId}/${config.environment}/api/softwaredynamics/procurement/v1.0/companies(${config.companyId})`;
   const url = path.startsWith("https://") ? path : `${base}/${path}`;
   if (!url.startsWith(`${API_BASE}/`)) {
@@ -201,6 +214,7 @@ async function request(config: BcConfig, method: "GET" | "POST", path: string, b
     headers: {
       authorization: `Bearer ${await accessToken(config)}`,
       accept: "application/json",
+      ...extraHeaders,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
